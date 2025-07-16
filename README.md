@@ -1,4 +1,4 @@
-# Teams Channel 權限自動化工具
+# Teams Channel 權限異動處理
 
 ## 功能
 - 自動匯出 Teams 群組成員名單（包含 Owner, Member）
