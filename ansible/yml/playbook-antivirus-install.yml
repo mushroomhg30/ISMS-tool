@@ -1,0 +1,180 @@
+#playbook yml for ISMS standards install for new vm
+- name: install nessecary patch 
+  hosts: ssh_servers #ssh_servers
+  become: yes # sudo提權
+  gather_facts: yes #傳值，非必要
+  tasks:
+    - name: Create dictionary
+      ansible.builtin.command:
+        cmd: "sudo mkdir -p /home/{{ansible_user}}/antivirus_install"
+    - name: Get time
+      ansible.builtin.command:
+       "date '+%Y-%m-%d'%H:%M --date='TZ=\"Asia/Taipei\" now'"
+      register: Times_output
+      changed_when: false
+
+    - name: Set Time
+      ansible.builtin.set_fact:
+        current_time: "{{ Times_output.stdout }}"
+        
+    - name: Copy file to host
+      ansible.builtin.copy:
+        src: "/home/{{ item }}"
+        dest: "/home/{{ ansible_user }}/antivirus_install/{{ item }}"
+        owner: "{{ansible_user}}"
+        group: "{{ansible_user}}"
+        mode: "0755"
+      loop:
+        - "[antivirus_install_file]"
+        - "[EDR_RHEL_install_file]]"
+        - "[antivirus_install_script]"
+        - "[EDR_Ubuntu_install_file]"
+    - name: Check ESET Intalled or not
+      ansible.builtin.systemd:
+        name: efs
+        state: started
+      register: efs_running_status
+      ignore_errors: true # 如果服務沒啟動，繼續執行後續步驟
+
+    - name: Run ESET installer silently
+      ansible.builtin.shell: "/home/{{ ansible_user }}/antivirus_install/[antivirus_install_file] -y -f"
+      args:
+        executable: /bin/bash
+      register: eset_install_result
+      when: efs_running_status.failed
+
+    - name: Stop GUI (Web UI)
+      ansible.builtin.command:
+        cmd: "sudo /opt/eset/efs/sbin/setgui -d"
+      when: efs_running_status.failed
+    
+    - name: Intall Selinux Policy Devel
+      ansible.builtin.dnf:
+        name: selinux-policy-devel
+        state: present
+      when: efs_running_status.failed
+    
+    - name: Install ESET Scipt (Server connection)
+      ansible.builtin.command:
+        cmd: "sudo bash /home/{{ ansible_user }}/antivirus_install/[antivirus_install_script]"
+      when: efs_running_status.failed
+
+    - name: Enable ESET 
+      ansible.builtin.systemd:
+        name: efs.service
+        state: started
+        enabled: true
+      when: efs_running_status.failed
+
+    - name: Check ESET Status
+      ansible.builtin.command:
+          cmd : "systemctl status efs.service --no-page"
+      register: eset_status
+      changed_when: false 
+
+    - name:  Check License
+      ansible.builtin.command:
+        cmd: "sudo /opt/eset/efs/sbin/lic -s"
+      register: lic_status
+
+    - name : Show ESET Status
+      ansible.builtin.debug:
+        msg: "{{eset_status.stdout}}"
+
+    - name: Show ESET License
+      ansible.builtin.debug:
+        msg: "{{lic_status.stdout}}"
+
+    - name: Check OS 
+      debug:
+        msg: "OS :{{ansible_facts.os_family}}, Distribution: {{ansible_facts.distribution }} "
+    - name: Checl MDR installed or not
+      ansible.builtin.systemd:
+        name: falcon-sensor
+        state: started
+      register: falcon_sensor_status
+      ignore_errors: true
+
+    - name: Choice Install cmd
+      ansible.builtin.set_fact:
+        install_cmd: >-
+          {{
+          ('sudo dnf install -y /home/'+ansible_user+'/antivirus_install/falcon*.rpm') if ansible_facts.os_family == 'RedHat'
+          else ('sudo dpkg -i /home/'+ansible_user+'/antivirus_install/falcon*.deb')
+          }}
+      when: falcon_sensor_status.failed
+
+    - name: Install MDR
+      ansible.builtin.shell:
+        cmd: "{{ install_cmd }}"
+      when: falcon_sensor_status.failed
+
+    - name: Update License
+      ansible.builtin.command:
+        cmd:  "[update license code]"
+      when: falcon_sensor_status.failed
+
+    - name: Enable MDR
+      ansible.builtin.systemd:
+        name: falcon-sensor.service
+        state: started
+        enabled: true
+      when: falcon_sensor_status.failed
+
+    - name: Check MDR process state
+      ansible.builtin.shell:
+        cmd: "ps -e | grep falcon-sensor"
+      register: mdr_status
+
+    - name: Show MDR Status
+      ansible.builtin.debug:
+        msg: "{{ mdr_status.stdout }}"
+    
+    - name: Check Dictionary file exist
+      ansible.builtin.find:
+        path: "/home/{{ansible_user}}/antivirus_install"
+        recurse: yes
+      register: install_dir
+
+    - name: Remove Install file
+      ansible.builtin.shell:
+        cmd: "sudo rm -r /home/{{ansible_user}}/antivirus_install"
+      when: install_dir.matched > 0
+
+    - name: Check NTP Service (Chronyd Status)
+      ansible.builtin.systemd:
+        name: chronyd
+        state: started
+      register: chronyd_status
+      ignore_errors: true
+    
+    - name: Install Chronyd
+      ansible.builtin.set_fact: >-
+        {{
+          '(sudo dnf install chronyd)' if ansible_facts.os_family == 'RedHat'
+          else ('sudo dpkg -i chronyd')      
+        }}
+      when: chronyd_status.failed
+
+    - name: Setting NTP Server
+      ansible.builtin.lineinfile:
+        path: '/etc/chrony.conf'
+        regexp: '^pool\s'
+        line: |
+          pool [specific NTP Server]
+        backup: yes
+
+    - name: Restart Chronyd 
+      ansible.builtin.systemd:
+        name: chronyd
+        state: restarted
+        enabled: yes
+
+    - name: Force Update Time
+      ansible.builtin.shell:
+        cmd: "chronyc sources -v | grep [specific NTP Server]"
+      register: chronyc_sources_status
+
+    - name: Get New NTP info 
+      ansible.builtin.debug:
+        msg: "{{ chronyc_sources_status.stdout }}"
